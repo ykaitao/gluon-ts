@@ -49,7 +49,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         dropout_rate: float,
         cardinality: List[int],
         embedding_dimension: List[int],
-        lags_seq: List[int],
+        lags_seq: List[int], # a list of lags for extracting subsequences (of length: context_length + prediction_length).
         scaling: bool = True,
         dtype: DType = np.float32,
         **kwargs,
@@ -132,7 +132,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         sequence_length : int
             length of sequence in the T (time) dimension (axis = 1).
         indices : List[int]
-            list of lag indices to be used.
+            list of lag indices to be used. The ending index of each subsequences on the input seuqnence.
         subsequences_length : int
             length of the subsequences to be extracted.
         Returns
@@ -183,9 +183,10 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         Returns outputs and state of the encoder, plus the scale of past_target
         and a vector of static features that was constructed and fed as input
         to the encoder.
-        All tensor arguments should have NTC layout.
+        All tensor arguments should have NTC layout. NTC means shape (N, T, C)
         """
 
+        # Why future info matters here? Here the future info is only about time and target (not feat_dynamic_real).
         if future_time_feat is None or future_target is None:
             time_feat = past_time_feat.slice_axis(
                 axis=1,
@@ -209,7 +210,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
             sequence_length = self.history_length + self.prediction_length
             subsequences_length = self.context_length + self.prediction_length
 
-        # (batch_size, sub_seq_len, *target_shape, num_lags)
+        # (batch_size, sub_seq_len, *target_shape, num_lags), if target is 1-d, then target_shape only has one element.
         lags = self.get_lagged_subsequences(
             F=F,
             sequence=sequence,
@@ -220,6 +221,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
 
         # scale is computed on the context length last units of the past target
         # scale shape is (batch_size, 1, *target_shape)
+        # what is past_observed_values? past_observed_values containing 1 or 0, indicating the target was observed or not.
         _, scale = self.scaler(
             past_target.slice_axis(
                 axis=1, begin=-self.context_length, end=None
@@ -232,9 +234,9 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         # (batch_size, num_features)
         embedded_cat = self.embedder(feat_static_cat)
 
-        # in addition to embedding features, use the log scale as it can help
+        # in addition to embedding features, use the log of `scale` as it can help
         # prediction too
-        # (batch_size, num_features + prod(target_shape))
+        # (batch_size, num_features + prod(target_shape)) # num_features + 1? where 1 is for F.log(scale)?
         static_feat = F.concat(
             embedded_cat,
             feat_static_real,
@@ -245,11 +247,13 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         )
 
         # (batch_size, subsequences_length, num_features + 1)
+        # subsequences_length is context_length for training, is context_length+prediction_length for inference.
         repeated_static_feat = static_feat.expand_dims(axis=1).repeat(
             axis=1, repeats=subsequences_length
         )
 
         # (batch_size, sub_seq_len, *target_shape, num_lags)
+        # lags: lagged subsequences of target.
         lags_scaled = F.broadcast_div(lags, scale.expand_dims(axis=-1))
 
         # from (batch_size, sub_seq_len, *target_shape, num_lags)
@@ -277,10 +281,11 @@ class DeepARNetwork(mx.gluon.HybridBlock):
                 dtype=self.dtype,
                 batch_size=inputs.shape[0]
                 if isinstance(inputs, mx.nd.NDArray)
-                else 0,
+                else 0, # Why batch_size can sometimes be 0?
             ),
         )
 
+        # I thought seq_len=num_cells, no? # num_cells equals units in Keras?
         # outputs: (batch_size, seq_len, num_cells)
         # state: list of (batch_size, num_cells) tensors
         # scale: (batch_size, 1, *target_shape)
@@ -380,10 +385,11 @@ class DeepARTrainingNetwork(DeepARNetwork):
             future_time_feat=future_time_feat,
             future_target=future_target,
             future_observed_values=future_observed_values,
-        )
+        ) 
 
         # put together target sequence
         # (batch_size, seq_len, *target_shape)
+        # Why context_length past_targt is needed?
         target = F.concat(
             past_target.slice_axis(
                 axis=1,
@@ -395,7 +401,7 @@ class DeepARTrainingNetwork(DeepARNetwork):
         )
 
         # (batch_size, seq_len)
-        loss = distr.loss(target)
+        loss = distr.loss(target) # Loss: Negative log likelihood. likelihood = N(target/scale; mu, sigma) if dist is Gaussina.
 
         # (batch_size, seq_len, *target_shape)
         observed_values = F.concat(
@@ -409,6 +415,7 @@ class DeepARTrainingNetwork(DeepARNetwork):
         )
 
         # mask the loss at one time step iff one or more observations is missing in the target dimensions
+        # observed_values: contains 1 / 0 (observed or not).
         # (batch_size, seq_len)
         loss_weights = (
             observed_values
@@ -430,10 +437,14 @@ class DeepARPredictionNetwork(DeepARNetwork):
     @validated()
     def __init__(self, num_parallel_samples: int = 100, **kwargs) -> None:
         super().__init__(**kwargs)
+        
+        # Number of evaluation samples per time series to increase parallelism during inference.
+        # This is a model optimization that does not affect the accuracy (default: 100)
         self.num_parallel_samples = num_parallel_samples
 
-        # for decoding the lags are shifted by one, at the first time-step
-        # of the decoder a lag of one corresponds to the last target value
+        # for decoding, the lags are shifted by one, at the first time-step
+        # of the decoder, a lag of one corresponds to the last target value
+        # Why shifted by 1?
         self.shifted_lags = [l - 1 for l in self.lags_seq]
 
     def sampling_decoder(
@@ -537,7 +548,7 @@ class DeepARPredictionNetwork(DeepARNetwork):
                 distr_args, scale=repeated_scale
             )
 
-            # (batch_size * num_samples, 1, *target_shape)
+            # (batch_size * num_samples, 1, *target_shape), num_samples comes from where?, shape should be: (batch_size, 1, *target_shape)
             new_samples = distr.sample(dtype=self.dtype)
 
             # (batch_size * num_samples, seq_len, *target_shape)
@@ -588,6 +599,7 @@ class DeepARPredictionNetwork(DeepARNetwork):
         """
 
         # unroll the decoder in "prediction mode", i.e. with past data only
+        #  outputs, state, scale, static_feat
         _, state, scale, static_feat = self.unroll_encoder(
             F=F,
             feat_static_cat=feat_static_cat,

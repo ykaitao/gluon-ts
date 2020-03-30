@@ -196,6 +196,7 @@ class InstanceSplitter(FlatMapTransformation):
                 ), f"pad_length should be zero, got {pad_length}"
             d = data.copy()
             for ts_field in slice_cols:
+                # i is the end of window
                 if i > self.past_length:
                     # truncate to past_length
                     past_piece = d[ts_field][..., i - self.past_length : i]

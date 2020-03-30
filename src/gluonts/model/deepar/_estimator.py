@@ -69,12 +69,12 @@ class DeepAREstimator(GluonEstimator):
     trainer
         Trainer object to be used (default: Trainer())
     context_length
-        Number of steps to unroll the RNN for before computing predictions
+        Number of steps to unroll the RNN before computing predictions
         (default: None, in which case context_length = prediction_length)
     num_layers
         Number of RNN layers (default: 2)
     num_cells
-        Number of RNN cells for each layer (default: 40)
+        Number of RNN cells for each layer (default: 40) # equal units in Keras? Yes
     cell_type
         Type of recurrent cells to use (available: 'lstm' or 'gru';
         default: 'lstm')
@@ -82,7 +82,7 @@ class DeepAREstimator(GluonEstimator):
         Dropout regularization parameter (default: 0.1)
     use_feat_dynamic_real
         Whether to use the ``feat_dynamic_real`` field from the data
-        (default: False)
+        (default: False), use_feat_dynamic_real is only about time information.
     use_feat_static_cat
         Whether to use the ``feat_static_cat`` field from the data
         (default: False)
@@ -103,7 +103,7 @@ class DeepAREstimator(GluonEstimator):
     lags_seq
         Indices of the lagged target values to use as inputs of the RNN
         (default: None, in which case these are automatically determined
-        based on freq)
+        based on freq). Used to calculate lagged version of targets.
     time_features
         Time features to use as inputs of the RNN (default: None, in which
         case these are automatically determined based on freq)
@@ -193,13 +193,18 @@ class DeepAREstimator(GluonEstimator):
             else time_features_from_frequency_str(self.freq)
         )
 
+        # Why? For each current month i, the previous [1,2,3,4,5,6,7] months, and 3 months[i-1, i, i+1] of each 
+        # previous 3 years is used as input. We call these months as the lagged months of current month i.
+        # lags_seq contains the index of these lagged months.
         self.history_length = self.context_length + max(self.lags_seq)
 
         self.num_parallel_samples = num_parallel_samples
 
     def create_transformation(self) -> Transformation:
-        remove_field_names = [FieldName.FEAT_DYNAMIC_CAT]
-        if not self.use_feat_static_real:
+        remove_field_names = [FieldName.FEAT_DYNAMIC_CAT] # e.g., month, dealOrNot
+        
+        if not self.use_feat_static_real: 
+            # e.g., firstYear
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
         if not self.use_feat_dynamic_real:
             remove_field_names.append(FieldName.FEAT_DYNAMIC_REAL)
@@ -234,7 +239,7 @@ class DeepAREstimator(GluonEstimator):
                 AsNumpyArray(
                     field=FieldName.TARGET,
                     # in the following line, we add 1 for the time dimension
-                    expected_ndim=1 + len(self.distr_output.event_shape),
+                    expected_ndim=1 + len(self.distr_output.event_shape), #?
                     dtype=self.dtype,
                 ),
                 AddObservedValuesIndicator(
@@ -272,13 +277,15 @@ class DeepAREstimator(GluonEstimator):
                     start_field=FieldName.START,
                     forecast_start_field=FieldName.FORECAST_START,
                     train_sampler=ExpectedNumInstanceSampler(num_instances=1),
-                    past_length=self.history_length,
+                    # history_length = context_length + max(self.lags_seq), 
+                    # where context_length is for pre-heat, max(self.lags_seq) is for training?
+                    past_length=self.history_length, 
                     future_length=self.prediction_length,
                     time_series_fields=[
                         FieldName.FEAT_TIME,
-                        FieldName.OBSERVED_VALUES,
+                        FieldName.OBSERVED_VALUES, # indictor whether target is observed: 1 or missing: 0.
                     ],
-                    dummy_value=self.distr_output.value_in_support,
+                    dummy_value=self.distr_output.value_in_support, # dummy_value = 0.0
                 ),
             ]
         )
