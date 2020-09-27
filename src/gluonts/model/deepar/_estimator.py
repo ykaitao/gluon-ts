@@ -193,8 +193,9 @@ class DeepAREstimator(GluonEstimator):
             else time_features_from_frequency_str(self.freq)
         )
 
-        # Why? For each current month i, the previous [1,2,3,4,5,6,7] months, and 3 months[i-1, i, i+1] of each 
-        # previous 3 years is used as input. We call these months as the lagged months of current month i.
+        # Why? For each current month i, the previous [1,2,3,4,5,6,7] months, 
+        # and 3 months[i-1, i, i+1] of each previous 3 years is used as input. 
+        # We call these months as the lagged months of current month i.
         # lags_seq contains the index of these lagged months.
         self.history_length = self.context_length + max(self.lags_seq)
 
@@ -237,6 +238,7 @@ class DeepAREstimator(GluonEstimator):
                     dtype=self.dtype,
                 ),
                 AsNumpyArray(
+                    # TARGET shape: (T,), ndim: 1
                     field=FieldName.TARGET,
                     # in the following line, we add 1 for the time dimension
                     expected_ndim=1 + len(self.distr_output.event_shape), #?
@@ -278,7 +280,8 @@ class DeepAREstimator(GluonEstimator):
                     forecast_start_field=FieldName.FORECAST_START,
                     train_sampler=ExpectedNumInstanceSampler(num_instances=1),
                     # history_length = context_length + max(self.lags_seq), 
-                    # where context_length is for pre-heat, max(self.lags_seq) is for training?
+                    # where context_length is the oldest input target, 
+                    # max(self.lags_seq) is the oldest lag for the oldest input target.
                     past_length=self.history_length, 
                     future_length=self.prediction_length,
                     time_series_fields=[

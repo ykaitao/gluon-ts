@@ -108,7 +108,8 @@ class InstanceSplitter(FlatMapTransformation):
         past_length time-units
         present for the time series. This is useful to train models for
         cold-start. In such case, is_pad_out contains an indicator whether
-        data is padded or not.
+        data is padded or not. Note: the training instance can have 0 history
+        but should have future_length targets.
     dummy_value
         Value to use for padding.
     """
@@ -187,7 +188,10 @@ class InstanceSplitter(FlatMapTransformation):
             )
         else:
             assert self.pick_incomplete or len_target >= self.past_length
+            # sampled_indices only has one element: len_target
             sampled_indices = np.array([len_target], dtype=int)
+
+        # i is the index of future starts
         for i in sampled_indices:
             pad_length = max(self.past_length - i, 0)
             if not self.pick_incomplete:

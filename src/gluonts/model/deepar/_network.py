@@ -49,7 +49,9 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         dropout_rate: float,
         cardinality: List[int],
         embedding_dimension: List[int],
-        lags_seq: List[int], # a list of lags for extracting subsequences (of length: context_length + prediction_length).
+        lags_seq: List[
+            int
+        ],  # a list of lags for extracting subsequences (of length: context_length + prediction_length).
         scaling: bool = True,
         dtype: DType = np.float32,
         **kwargs,
@@ -186,8 +188,10 @@ class DeepARNetwork(mx.gluon.HybridBlock):
         All tensor arguments should have NTC layout. NTC means shape (N, T, C)
         """
 
-        # Why future info matters here? Here the future info is only about time and target (not feat_dynamic_real).
+        # Why future info matters here? Here the future info is only about
+        # time and target (not feat_dynamic_real).
         if future_time_feat is None or future_target is None:
+            # For training?
             time_feat = past_time_feat.slice_axis(
                 axis=1,
                 begin=self.history_length - self.context_length,
@@ -197,6 +201,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
             sequence_length = self.history_length
             subsequences_length = self.context_length
         else:
+            # For inference?
             time_feat = F.concat(
                 past_time_feat.slice_axis(
                     axis=1,
@@ -210,7 +215,8 @@ class DeepARNetwork(mx.gluon.HybridBlock):
             sequence_length = self.history_length + self.prediction_length
             subsequences_length = self.context_length + self.prediction_length
 
-        # (batch_size, sub_seq_len, *target_shape, num_lags), if target is 1-d, then target_shape only has one element.
+        # (batch_size, subsequences_length, *target_shape, num_lags),
+        # if target is 1d, then target_shape only has one element.
         lags = self.get_lagged_subsequences(
             F=F,
             sequence=sequence,
@@ -219,9 +225,10 @@ class DeepARNetwork(mx.gluon.HybridBlock):
             subsequences_length=subsequences_length,
         )
 
-        # scale is computed on the context length last units of the past target
+        # scale is computed on the last part (of context_length) of the past target
         # scale shape is (batch_size, 1, *target_shape)
-        # what is past_observed_values? past_observed_values containing 1 or 0, indicating the target was observed or not.
+        # what is past_observed_values? past_observed_values containing 1 or 0,
+        # indicating the target was observed or not.
         _, scale = self.scaler(
             past_target.slice_axis(
                 axis=1, begin=-self.context_length, end=None
@@ -236,28 +243,30 @@ class DeepARNetwork(mx.gluon.HybridBlock):
 
         # in addition to embedding features, use the log of `scale` as it can help
         # prediction too
-        # (batch_size, num_features + prod(target_shape)) # num_features + 1? where 1 is for F.log(scale)?
+        # (batch_size, num_features + prod(target_shape))
+        # where `prod(target_shape)` is for F.log(scale).
         static_feat = F.concat(
             embedded_cat,
             feat_static_real,
             F.log(scale)
-            if len(self.target_shape) == 0
+            if len(self.target_shape) == 0  # How can len(target_shape) == 0?
             else F.log(scale.squeeze(axis=1)),
             dim=1,
         )
 
         # (batch_size, subsequences_length, num_features + 1)
-        # subsequences_length is context_length for training, is context_length+prediction_length for inference.
+        # subsequences_length is context_length for training,
+        # is context_length+prediction_length for inference.
         repeated_static_feat = static_feat.expand_dims(axis=1).repeat(
             axis=1, repeats=subsequences_length
         )
 
-        # (batch_size, sub_seq_len, *target_shape, num_lags)
+        # (batch_size, subsequences_length, *target_shape, num_lags)
         # lags: lagged subsequences of target.
         lags_scaled = F.broadcast_div(lags, scale.expand_dims(axis=-1))
 
-        # from (batch_size, sub_seq_len, *target_shape, num_lags)
-        # to (batch_size, sub_seq_len, prod(target_shape) * num_lags)
+        # from (batch_size, subsequences_length, *target_shape, num_lags)
+        # to (batch_size, subsequences_length, prod(target_shape) * num_lags)
         input_lags = F.reshape(
             data=lags_scaled,
             shape=(
@@ -267,7 +276,7 @@ class DeepARNetwork(mx.gluon.HybridBlock):
             ),
         )
 
-        # (batch_size, sub_seq_len, input_dim)
+        # (batch_size, subsequences_length, input_dim)
         inputs = F.concat(input_lags, time_feat, repeated_static_feat, dim=-1)
 
         # unroll encoder
@@ -281,12 +290,12 @@ class DeepARNetwork(mx.gluon.HybridBlock):
                 dtype=self.dtype,
                 batch_size=inputs.shape[0]
                 if isinstance(inputs, mx.nd.NDArray)
-                else 0, # Why batch_size can sometimes be 0?
+                else 0,  # Why batch_size can sometimes be 0? Should at least be 1, right?
             ),
         )
 
-        # I thought seq_len=num_cells, no? # num_cells equals units in Keras?
-        # outputs: (batch_size, seq_len, num_cells)
+        # num_cells equals `units` in Keras, meaning the output dim of cell.
+        # outputs: (batch_size, subsequences_length, num_cells)
         # state: list of (batch_size, num_cells) tensors
         # scale: (batch_size, 1, *target_shape)
         # static_feat: (batch_size, num_features + prod(target_shape))
@@ -385,11 +394,12 @@ class DeepARTrainingNetwork(DeepARNetwork):
             future_time_feat=future_time_feat,
             future_target=future_target,
             future_observed_values=future_observed_values,
-        ) 
+        )
 
         # put together target sequence
         # (batch_size, seq_len, *target_shape)
-        # Why context_length past_targt is needed?
+        # Why context_length of past_targt is needed?
+        # To me, I thick it should only use `future_target` to calculate loss.
         target = F.concat(
             past_target.slice_axis(
                 axis=1,
@@ -401,7 +411,9 @@ class DeepARTrainingNetwork(DeepARNetwork):
         )
 
         # (batch_size, seq_len)
-        loss = distr.loss(target) # Loss: Negative log likelihood. likelihood = N(target/scale; mu, sigma) if dist is Gaussina.
+        # Loss: Negative log likelihood.
+        # likelihood = N(target/scale; mu, sigma) if dist is Gaussina.
+        loss = distr.loss(target)
 
         # (batch_size, seq_len, *target_shape)
         observed_values = F.concat(
@@ -414,8 +426,8 @@ class DeepARTrainingNetwork(DeepARNetwork):
             dim=1,
         )
 
-        # mask the loss at one time step iff one or more observations is missing in the target dimensions
-        # observed_values: contains 1 / 0 (observed or not).
+        # mask the loss at one time step iff one or more observations is missing
+        # in the target dimensions observed_values: contains 1 / 0 (observed or not).
         # (batch_size, seq_len)
         loss_weights = (
             observed_values
@@ -437,7 +449,7 @@ class DeepARPredictionNetwork(DeepARNetwork):
     @validated()
     def __init__(self, num_parallel_samples: int = 100, **kwargs) -> None:
         super().__init__(**kwargs)
-        
+
         # Number of evaluation samples per time series to increase parallelism during inference.
         # This is a model optimization that does not affect the accuracy (default: 100)
         self.num_parallel_samples = num_parallel_samples
@@ -548,7 +560,10 @@ class DeepARPredictionNetwork(DeepARNetwork):
                 distr_args, scale=repeated_scale
             )
 
-            # (batch_size * num_samples, 1, *target_shape), num_samples comes from where?, shape should be: (batch_size, 1, *target_shape)
+            # (batch_size * num_samples, 1, *target_shape),
+            # num_samples comes from where?, because of repeats=self.num_parallel_samples,
+            # where num_parallel_samples==num_samples,
+            # The shape should be: (batch_size * num_samples, 1)
             new_samples = distr.sample(dtype=self.dtype)
 
             # (batch_size * num_samples, seq_len, *target_shape)
